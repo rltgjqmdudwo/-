@@ -1,6 +1,7 @@
+require('dotenv').config();
 const { Client, GatewayIntentBits } = require('discord.js');
 const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus } = require('@discordjs/voice');
-const ytdl = require('ytdl-core');
+const playdl = require('play-dl');
 const youtube = require('youtube-sr').default;
 
 const client = new Client({
@@ -12,20 +13,22 @@ const client = new Client({
   ]
 });
 
-const token = 'MTM2Mzg5NDAyNjUxNTc3OTY0OA.GAoPbN.2bV4ptaueZHfDzFdODrwFh4ASqdMhQjDsavnpY'; // 절대 코드에 토큰 노출하지 마세요
+const token = process.env.TOKEN;
 const queue = new Map();
+
+client.on('ready', () => {
+  console.log(`✅ 로그인 완료: ${client.user.tag}`);
+});
 
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
-
   const serverQueue = queue.get(message.guild.id);
 
-  // 🎵 !재생 명령어
   if (message.content.startsWith('!재생')) {
     const query = message.content.replace('!재생', '').trim();
     if (!query) return message.reply('🎵 검색할 노래 제목을 입력해주세요!');
 
-    const results = await youtube.search(query, { limit: 5 });
+    const results = await youtube.search(query, { limit: 3 });
     if (results.length === 0) return message.reply('🔍 검색 결과가 없어요.');
 
     let reply = '🔎 검색 결과:\n';
@@ -33,12 +36,10 @@ client.on('messageCreate', async (message) => {
       reply += `\`${index + 1}\` ▶️ ${video.title} (${video.durationFormatted})\n`;
     });
     reply += '\n숫자를 입력해 노래를 선택하세요 (예: `1`)';
-
     await message.reply(reply);
 
-    const filter = m => m.author.id === message.author.id && /^[1-5]$/.test(m.content);
+    const filter = m => m.author.id === message.author.id && /^[1-3]$/.test(m.content);
     const collected = await message.channel.awaitMessages({ filter, max: 1, time: 15000 });
-
     if (!collected.size) return message.reply('⏱️ 시간이 초과되었어요.');
 
     const choice = parseInt(collected.first().content);
@@ -69,26 +70,12 @@ client.on('messageCreate', async (message) => {
     }
   }
 
-    // ⏭️ !스킵 명령어
-    if (message.content === '!스킵') {
-      if (!serverQueue) return message.reply('⛔ 현재 재생 중인 노래가 없어요!');
-      if (serverQueue.songs.length <= 1) {
-        serverQueue.player.stop();
-        return message.reply('⏹️ 다음 곡이 없어 재생을 중지합니다.');
-      }
-      serverQueue.player.stop(); // 현재 곡 강제 종료 → 다음 곡 자동 재생
-      message.reply('⏭️ 다음 곡으로 넘어갑니다!');
-    }
-    
-  // ❌ !취소 명령어
-  if (message.content.startsWith('!취소')) {
-    const index = parseInt(message.content.split(' ')[1]) - 1;
-    if (!serverQueue || !serverQueue.songs[index + 1]) return message.reply('❌ 해당 순번의 노래가 없어요!');
-    const removed = serverQueue.songs.splice(index + 1, 1); // 현재 재생 중인 곡은 제외
-    message.channel.send(`🗑️ **${removed[0].title}** 예약을 취소했어요.`);
+  if (message.content === '!스킵') {
+    if (!serverQueue) return message.reply('⛔ 현재 재생 중인 노래가 없어요!');
+    serverQueue.player.stop();
+    message.reply('⏭️ 다음 곡으로 넘어갑니다!');
   }
 
-  // 📜 !대기열 명령어
   if (message.content === '!대기열') {
     if (!serverQueue || serverQueue.songs.length === 0) {
       return message.reply('📭 대기열이 비어 있어요!');
@@ -104,33 +91,41 @@ client.on('messageCreate', async (message) => {
   }
 });
 
-// 재생 함수
 async function playSong(guild, song) {
   const serverQueue = queue.get(guild.id);
   if (!song) {
-    serverQueue.connection.destroy();
+    if (serverQueue.connection) serverQueue.connection.destroy();
     queue.delete(guild.id);
     return;
   }
 
-  const stream = ytdl(song.url, { filter: 'audioonly' });
-  const resource = createAudioResource(stream);
+  try {
+    await new Promise(resolve => setTimeout(resolve, 1500)); // 딜레이
 
-  serverQueue.player.play(resource);
+    const stream = await playdl.stream(song.url);
+    const resource = createAudioResource(stream.stream, { inputType: stream.type });
 
-  serverQueue.connection = joinVoiceChannel({
-    channelId: serverQueue.voiceChannel.id,
-    guildId: guild.id,
-    adapterCreator: guild.voiceAdapterCreator
-  });
+    serverQueue.player.play(resource);
 
-  serverQueue.connection.subscribe(serverQueue.player);
-  serverQueue.textChannel.send(`▶️ 재생 중: **${song.title}** (요청: ${song.requestedBy})`);
+    serverQueue.connection = joinVoiceChannel({
+      channelId: serverQueue.voiceChannel.id,
+      guildId: guild.id,
+      adapterCreator: guild.voiceAdapterCreator
+    });
 
-  serverQueue.player.once(AudioPlayerStatus.Idle, () => {
+    serverQueue.connection.subscribe(serverQueue.player);
+    serverQueue.textChannel.send(`▶️ 재생 중: **${song.title}** (요청: ${song.requestedBy})`);
+
+    serverQueue.player.once(AudioPlayerStatus.Idle, () => {
+      serverQueue.songs.shift();
+      playSong(guild, serverQueue.songs[0]);
+    });
+  } catch (err) {
+    console.error("❌ 오류 발생:", err);
+    serverQueue.textChannel.send("⚠️ 이 노래는 재생할 수 없습니다. 다른 곡을 시도해보세요!");
     serverQueue.songs.shift();
     playSong(guild, serverQueue.songs[0]);
-  });
+  }
 }
 
 client.login(token);
